@@ -8,7 +8,6 @@ import org.apache.http.impl.client.HttpClients;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
@@ -24,38 +23,40 @@ public class CrptApi {
     public CrptApi(TimeUnit timeUnit, int requestLimit) {
         this.timeUnit = timeUnit;
         this.requestLimit = requestLimit;
-        this.requestTimes = new LinkedList<>();
+        this.requestTimes = new ConcurrentLinkedQueue<>();
         this.lock = new ReentrantLock();
     }
 
     public void createDocument(Document document, String signature) throws InterruptedException, JsonProcessingException {
+        ensureRateLimit();
+        sendRequest(document, signature);
+    }
+
+    private void ensureRateLimit() throws InterruptedException {
         lock.lock();
         try {
-            ensureRateLimit();
-            sendRequest(document, signature);
+            Instant now = Instant.now();
+            Instant windowStart = now.minusMillis(timeUnit.toMillis(1));
+            while (requestTimes.size() >= requestLimit && requestTimes.peek().isBefore(windowStart)) {
+                requestTimes.poll();
+            }
+            if (requestTimes.size() >= requestLimit) {
+                Instant earliestRequest = requestTimes.peek();
+                long waitTime = timeUnit.toMillis(1) - (now.toEpochMilli() - earliestRequest.toEpochMilli());
+                if (waitTime > 0) {
+                    lock.unlock();
+                    Thread.sleep(waitTime);
+                    lock.lock();
+                }
+                requestTimes.poll();
+            }
+            requestTimes.add(now);
         } finally {
             lock.unlock();
         }
     }
 
-    private void ensureRateLimit() throws InterruptedException {
-        Instant now = Instant.now();
-        Instant windowStart = now.minusMillis(timeUnit.toMillis(1));
-        while (requestTimes.size() >= requestLimit && requestTimes.peek().isBefore(windowStart)) {
-            requestTimes.poll();
-        }
-        if (requestTimes.size() >= requestLimit) {
-            Instant earliestRequest = requestTimes.peek();
-            long waitTime = timeUnit.toMillis(1) - (now.toEpochMilli() - earliestRequest.toEpochMilli());
-            if (waitTime > 0) {
-                Thread.sleep(waitTime);
-            }
-            requestTimes.poll();
-        }
-        requestTimes.add(now);
-    }
-
-    public void sendRequest(Document document, String signature) throws JsonProcessingException {
+    private void sendRequest(Document document, String signature) throws JsonProcessingException {
         ObjectMapper objectMapper = new ObjectMapper();
         String json = objectMapper.writeValueAsString(document);
 
@@ -68,15 +69,13 @@ public class CrptApi {
             try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
                 int statusCode = response.getStatusLine().getStatusCode();
                 if (statusCode != 200) {
-                    throw new RuntimeException("Failed to create a document");
+                    throw new RuntimeException("Failed to create a document: HTTP error code :" + statusCode);
                 }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
-
-    /// we can add getters and setters to classes below
 
     public static class Document {
         private Description description;
@@ -92,10 +91,14 @@ public class CrptApi {
         private Product[] products;
         private String reg_date;
         private String reg_number;
+
+        // Getters and Setters
     }
 
     public static class Description {
         private String participantInn;
+
+        // Getters and Setters
     }
 
     public static class Product {
@@ -108,5 +111,7 @@ public class CrptApi {
         private String tnved_code;
         private String uit_code;
         private String uitu_code;
+
+        // Getters and Setters
     }
 }
